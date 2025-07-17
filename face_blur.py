@@ -1,39 +1,86 @@
 import cv2 as cv
-import numpy as np
 
-#initialize webcam
+# Load DNN face detection model
+modelFile = "res10_300x300_ssd_iter_140000.caffemodel"
+configFile = "deploy.prototxt"
+net = cv.dnn.readNetFromCaffe(configFile, modelFile)
+
+# Initialize webcam
 capture = cv.VideoCapture(0)
+tracker = None
+track_initialized = False
+mode = 'blur'
 
-#load face cascade
-face_cascade = cv.CascadeClassifier(cv.data.haarcascades + 'haarcascade_frontalface_default.xml')
+def pixelate(face_roi, pixel_size=10):
+    h, w = face_roi.shape[:2]
+    temp = cv.resize(face_roi, (w // pixel_size, h // pixel_size), interpolation=cv.INTER_NEAREST)
+    return cv.resize(temp, (w, h), interpolation=cv.INTER_NEAREST)
 
 while True:
-    #read frame from webcam
     ret, frame = capture.read()
-    #flip frame horizontally for mirror effect
     frame = cv.flip(frame, 1)
-
     if not ret:
         break
-    
-    #convert to grayscale
-    gray = cv.cvtColor(frame, cv.COLOR_BGR2GRAY)
 
-    #detect faces
-    faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=4)
+    h, w = frame.shape[:2]
 
-    #draw rectangle around faces
-    for (x, y, w, h) in faces:
-        #cv.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
-        face_roi = frame[y:y+h, x:x+w]
-        ksize = int(min(w, h) / 2) | 1 
-        blurred_face = cv.GaussianBlur(face_roi, (ksize, ksize), 0)
+    # Face detection if no active tracker
+    if not track_initialized:
+        blob = cv.dnn.blobFromImage(frame, 1.0, (300, 300), [104, 117, 123], False, False)
+        net.setInput(blob)
+        detections = net.forward()
 
-        frame[y:y+h, x:x+w] = blurred_face
+        for i in range(detections.shape[2]):
+            confidence = detections[0, 0, i, 2]
+            if confidence > 0.6:
+                box = detections[0, 0, i, 3:7] * [w, h, w, h]
+                (x1, y1, x2, y2) = box.astype("int")
+                x1, y1 = max(0, x1), max(0, y1)
+                x2, y2 = min(w, x2), min(h, y2)
+
+                # Replace this line with your OpenCV version's tracker
+                tracker = cv.legacy.TrackerKCF_create()
+                tracker.init(frame, (x1, y1, x2 - x1, y2 - y1))
+                track_initialized = True
+                break
+
+    else:
+        success, box = tracker.update(frame)
+        if success:
+            (x1, y1, w_box, h_box) = [int(v) for v in box]
+            x2, y2 = x1 + w_box, y1 + h_box
+            x1, y1 = max(0, x1), max(0, y1)
+            x2, y2 = min(w, x2), min(h, y2)
+
+            face_roi = frame[y1:y2, x1:x2]
+
+            if face_roi.size == 0:
+                continue
+
+            if mode == 'pixelate':
+                face_roi = pixelate(face_roi)
+            elif mode == 'blur':
+                ksize = (151, 151)
+                face_roi = cv.GaussianBlur(face_roi, ksize, 0)
+
+            # Apply the processed face back to frame
+            frame[y1:y2, x1:x2] = face_roi
+            cv.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+        else:
+            track_initialized = False  # Re-trigger DNN
+
+    # Display mode
+    cv.putText(frame, f"Mode: {mode.upper()} | [B]lur | [P]ixelate | [Q]uit",
+               (10, 30), cv.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
     cv.imshow('Video', frame)
 
-    if cv.waitKey(1) & 0xFF == ord('q'):
+    key = cv.waitKey(1) & 0xFF
+    if key == ord('q'):
         break
+    elif key == ord('b'):
+        mode = 'blur'
+    elif key == ord('p'):
+        mode = 'pixelate'
 
 capture.release()
 cv.destroyAllWindows()
